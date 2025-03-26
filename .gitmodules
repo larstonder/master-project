@@ -1,3 +1,6 @@
 [submodule "drivestudio"]
 	path = drivestudio
 	url = git@github.com:larstonder/drivestudio.git
+[submodule "nuplan-devkit"]
+	path = nuplan-devkit
+	url = https://github.com/motional/nuplan-devkit.git
