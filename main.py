@@ -19,7 +19,6 @@ def do_simulation(
         action = agent.get_action(sensor_output)
         simulator.do_action(action)
         error_history.append(simulator.get_state()) # something like this
-        simulator.update()
     
     return error_history
 
