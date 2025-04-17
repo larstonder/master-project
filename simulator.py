@@ -1,16 +1,21 @@
+"""
+This script initializes a NuPlan simulator and
+provides methods to get the current state of the simulation
+and perform actions based on a given trajectory.
+It uses the NuPlan database and maps to create a simulation environment.
+It also includes a function to create a waypoint from a given point.
+"""
+
 import os
+from sim_types import State, Position
 from omegaconf import OmegaConf
-from nuplan.common.utils.interpolatable_state import InterpolatableState
 from nuplan.common.actor_state.oriented_box import OrientedBox
 from nuplan.common.actor_state.vehicle_parameters import get_pacifica_parameters
-from nuplan.common.actor_state.state_representation import StateSE2, StateVector2D
+from nuplan.common.actor_state.state_representation import StateSE2
 from nuplan.common.actor_state.waypoint import Waypoint
 from nuplan.planning.scenario_builder.nuplan_db.nuplan_scenario_builder import NuPlanScenarioBuilder
 from nuplan.planning.scenario_builder.scenario_filter import ScenarioFilter
-from nuplan.planning.scenario_builder.abstract_scenario import AbstractScenario
-from nuplan.planning.simulation.controller.abstract_controller import AbstractEgoController
 from nuplan.planning.simulation.observation.tracks_observation import TracksObservation
-from nuplan.planning.simulation.planner.abstract_planner import AbstractPlanner
 from nuplan.planning.simulation.simulation_time_controller.step_simulation_time_controller import (
     StepSimulationTimeController,
 )
@@ -30,19 +35,29 @@ MAP_NAME = "us-nv-las-vegas"
 
 
 class Simulator:
+    """Base class for the simulator."""
     def __init__(self):
         pass
-    
+
     def get_state(self):
-        pass
+        """Get the current state of the simulation."""
+        raise NotImplementedError("This method should be overridden in subclasses.")
 
     def do_action(self, action):
-        pass
+        """Perform an action in the simulation."""
+        raise NotImplementedError("This method should be overridden in subclasses.")
 
 class NuPlan(Simulator):
+    """
+    NuPlan simulator class that initializes the NuPlan simulation environment.
+    It uses the NuPlan database and maps to create a simulation environment.
+    It provides methods to get the current state of the simulation and perform
+    actions based on a given trajectory.
+    """
 
     def __init__(self):
-        print("Initializing NuPlan...")
+        super().__init__()
+        print("Initializing NuPlan simulator...")
         scenario_builder = NuPlanScenarioBuilder(
             data_root=NUPLAN_DATA_ROOT,
             map_root=NUPLAN_MAPS_ROOT,
@@ -70,7 +85,7 @@ class NuPlan(Simulator):
 
         worker_config = OmegaConf.create({
             'worker': {
-                '_target_': 'nuplan.planning.utils.multithreading.worker_sequential.Sequential',  # Specify the worker class
+                '_target_': 'nuplan.planning.utils.multithreading.worker_sequential.Sequential',
             }
         })
 
@@ -82,48 +97,71 @@ class NuPlan(Simulator):
         controller = PerfectTrackingController(scenario)
 
         simulation_setup = SimulationSetup(
-            time_controller=time_controller,  # Required simulation time controller
-            observations=observation,  # Required observation
-            ego_controller=controller,  # Required ego controller
-            scenario=scenario  # Required scenario
+            time_controller=time_controller,
+            observations=observation,
+            ego_controller=controller,
+            scenario=scenario
         )
-        
+
         self.simulation = Simulation(
-            simulation_setup=simulation_setup,  # Required simulation setup
-            callback=None,  # Optional callback functions
-            simulation_history_buffer_duration=2.0  # Optional history buffer duration
+            simulation_setup=simulation_setup,
+            callback=None,
+            simulation_history_buffer_duration=2.0
         )
 
         self.simulation.initialize()
-        
+
         planner_input = self.simulation.get_planner_input()
         history = planner_input.history
         self.original_ego_state, self.original_observation_state = history.current_state
         
-        self.ego_vehicle_oriented_box = self.original_ego_state[-1].waypoint.oriented_box
+        print(self.original_ego_state)
+
+        self.ego_vehicle_oriented_box = self.original_ego_state.waypoint.oriented_box
 
         print("NuPlan initialized.")
-    
-    def get_state(self):
+
+    def get_state(self) -> State:
         planner_input = self.simulation.get_planner_input()
         history = planner_input.history
         ego_state, observation_state = history.current_state
-        
-        ego_pos = ego_state[-1].waypoint.center
-        agent_pos_list = [
-            agent.center for agent in observation_state[-1].tracked_objects.get_agents()
+
+        ego_pos: Position = Position(
+            x=ego_state.waypoint.center.x,
+            y=ego_state.waypoint.center.y,
+            z=0,
+            heading=ego_state.waypoint.heading
+        )
+        agent_pos_list: list[Position] = [
+            Position(
+                x=agent.center.x,
+                y=agent.center.y,
+                z=0,
+                heading=agent.center.heading
+            )
+            for agent in observation_state.tracked_objects.get_agents()
         ]
-        return ego_pos, agent_pos_list
-    
+        state = State(
+            ego_pos=ego_pos,
+            vehicle_pos_list=agent_pos_list,
+            timestamp=ego_state.waypoint.time_point
+        )
+        return state
+
     def do_action(self, action):
-        trajectory = action.get_trajectory()
+        trajectory = action
         interpolated_trajectory = self.create_interpolated_trajectory(trajectory)
         self.simulation.propagate(interpolated_trajectory)
-    
+
     def create_interpolated_trajectory(self, trajectory):
+        """
+        Create an interpolated trajectory from a given trajectory.
+        :param trajectory: The trajectory to create the interpolated trajectory from.
+        :return: The created interpolated trajectory.
+        """
         waypoints = [Waypoint(point.time_point, point.oriented_box, point.velocity) for point in trajectory]
         return InterpolatedTrajectory(waypoints)
-    
+
     def create_waypoint_from_point(self, point):
         """
         Create a waypoint from a point.
@@ -134,17 +172,11 @@ class NuPlan(Simulator):
         oriented_box = OrientedBox(
             pose,
             width=self.ego_vehicle_oriented_box.width,
-            length=width=self.ego_vehicle_oriented_box.length,
-            height=width=self.ego_vehicle_oriented_box.height
+            length=self.ego_vehicle_oriented_box.length,
+            height=self.ego_vehicle_oriented_box.height
         )
         return Waypoint(
             time_point=point.time_point,
-            oriented_box=point.oriented_box,
+            oriented_box=oriented_box,
             velocity=point.velocity
         )
-
-def main():
-    nuplan = NuPlan()
-
-if __name__ == "__main__":
-    main()
