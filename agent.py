@@ -32,5 +32,5 @@ class RandomAgent(Agent):
             velocity = 1.0
             center = StateSE2(x, y, heading)
             oriented_box = OrientedBox(center, 1.0, 1.0, 1.0)
-            trajectory.append((time_point, oriented_box, velocity))
+            trajectory.append((time_point, oriented_box, velocity)) # this needs to be a waypoint typr
         return trajectory
