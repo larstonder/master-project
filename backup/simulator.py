@@ -7,7 +7,7 @@ It also includes a function to create a waypoint from a given point.
 """
 
 import os
-from sim_types import State, Position
+import traceback
 from omegaconf import OmegaConf
 from nuplan.common.actor_state.oriented_box import OrientedBox
 from nuplan.common.actor_state.vehicle_parameters import get_pacifica_parameters
@@ -16,6 +16,7 @@ from nuplan.common.actor_state.waypoint import Waypoint
 from nuplan.planning.scenario_builder.nuplan_db.nuplan_scenario_builder import NuPlanScenarioBuilder
 from nuplan.planning.scenario_builder.scenario_filter import ScenarioFilter
 from nuplan.planning.simulation.observation.tracks_observation import TracksObservation
+from nuplan.planning.simulation.history.simulation_history_buffer import SimulationHistoryBuffer
 from nuplan.planning.simulation.simulation_time_controller.step_simulation_time_controller import (
     StepSimulationTimeController,
 )
@@ -24,6 +25,13 @@ from nuplan.planning.simulation.simulation_setup import SimulationSetup
 from nuplan.planning.script.builders.worker_pool_builder import build_worker
 from nuplan.planning.simulation.controller.perfect_tracking import PerfectTrackingController
 from nuplan.planning.simulation.trajectory.interpolated_trajectory import InterpolatedTrajectory
+from nuplan.common.actor_state.dynamic_car_state import DynamicCarState
+from nuplan.common.actor_state.state_representation import StateVector2D
+from nuplan.common.actor_state.ego_state import EgoState
+from nuplan.common.actor_state.ego_state import CarFootprint
+from state_types import State, VehicleState, Action
+from interfaces import Simulator
+
 
 NUPLAN_DATA_ROOT = os.getenv('NUPLAN_DATA_ROOT', '/data/sets/nuplan')
 NUPLAN_MAPS_ROOT = os.getenv('NUPLAN_MAPS_ROOT', '/data/sets/nuplan/maps')
@@ -33,26 +41,13 @@ NUPLAN_SENSOR_ROOT = f"{NUPLAN_DATA_ROOT}/nuplan-v1.1/sensor_blobs"
 DB_FILE = f"{NUPLAN_DATA_ROOT}/nuplan-v1.1/splits/mini/2021.05.12.22.28.35_veh-35_00620_01164.db"
 MAP_NAME = "us-nv-las-vegas"
 
-
-class Simulator:
-    """Base class for the simulator."""
-    def __init__(self):
-        pass
-
-    def get_state(self):
-        """Get the current state of the simulation."""
-        raise NotImplementedError("This method should be overridden in subclasses.")
-
-    def do_action(self, action):
-        """Perform an action in the simulation."""
-        raise NotImplementedError("This method should be overridden in subclasses.")
-
 class NuPlan(Simulator):
     """
     NuPlan simulator class that initializes the NuPlan simulation environment.
     It uses the NuPlan database and maps to create a simulation environment.
     It provides methods to get the current state of the simulation and perform
     actions based on a given trajectory.
+    NOTE: https://github.com/motional/nuplan-devkit/blob/master/docs/metrics_description.md metrics description
     """
 
     def __init__(self):
@@ -90,17 +85,21 @@ class NuPlan(Simulator):
         })
 
         worker = build_worker(worker_config)
-        scenario = scenario_builder.get_scenarios(scenario_filter, worker)[0]
+        self.scenario = scenario_builder.get_scenarios(scenario_filter, worker)[0]
 
-        time_controller = StepSimulationTimeController(scenario)
-        observation = TracksObservation(scenario)
-        controller = PerfectTrackingController(scenario)
+        time_controller = StepSimulationTimeController(self.scenario)
+        
+        for i in range(1000):
+            time_controller.next_iteration()
+        
+        observation = TracksObservation(self.scenario)
+        controller = PerfectTrackingController(self.scenario)
 
         simulation_setup = SimulationSetup(
             time_controller=time_controller,
             observations=observation,
             ego_controller=controller,
-            scenario=scenario
+            scenario=self.scenario
         )
 
         self.simulation = Simulation(
@@ -112,32 +111,36 @@ class NuPlan(Simulator):
         self.simulation.initialize()
 
         planner_input = self.simulation.get_planner_input()
-        history = planner_input.history
+        history: SimulationHistoryBuffer = planner_input.history
         self.original_ego_state, self.original_observation_state = history.current_state
-        
-        print(self.original_ego_state)
-
         self.ego_vehicle_oriented_box = self.original_ego_state.waypoint.oriented_box
 
-        print("NuPlan initialized.")
+        print("NuPlan init completed")
 
+
+    def get_planner_input(self):
+        # print("THIS IS THE PLANNER INPUT", self.simulation.get_planner_input())
+        return self.simulation.get_planner_input()
+
+    # !!! REWORK
     def get_state(self) -> State:
         planner_input = self.simulation.get_planner_input()
         history = planner_input.history
         ego_state, observation_state = history.current_state
-
-        ego_pos: Position = Position(
+        
+        ego_pos: VehicleState = VehicleState(
             x=ego_state.waypoint.center.x,
             y=ego_state.waypoint.center.y,
-            z=0,
+            z=606.740,  # height of camera
             heading=ego_state.waypoint.heading
         )
-        agent_pos_list: list[Position] = [
-            Position(
+        agent_pos_list: list[VehicleState] = [
+            VehicleState(
                 x=agent.center.x,
                 y=agent.center.y,
-                z=0,
-                heading=agent.center.heading
+                z=606.740,
+                heading=agent.center.heading,
+                id=agent.metadata.track_token
             )
             for agent in observation_state.tracked_objects.get_agents()
         ]
@@ -148,35 +151,59 @@ class NuPlan(Simulator):
         )
         return state
 
-    def do_action(self, action):
-        trajectory = action
-        interpolated_trajectory = self.create_interpolated_trajectory(trajectory)
-        self.simulation.propagate(interpolated_trajectory)
 
-    def create_interpolated_trajectory(self, trajectory):
+    def do_action(self, trajectory):
+        # interpolated_trajectory = self.create_interpolated_trajectory(trajectory)
+        self.simulation.propagate(trajectory)
+
+    # !!! REWORK
+    def create_interpolated_trajectory(self, trajectory: InterpolatedTrajectory):
         """
         Create an interpolated trajectory from a given trajectory.
         :param trajectory: The trajectory to create the interpolated trajectory from.
         :return: The created interpolated trajectory.
         """
-        waypoints = [Waypoint(point.time_point, point.oriented_box, point.velocity) for point in trajectory]
-        return InterpolatedTrajectory(waypoints)
+        # Convert Waypoints to EgoStates
+        ego_states = []
+        vehicle_parameters = get_pacifica_parameters()
 
-    def create_waypoint_from_point(self, point):
+        for ego_state in trajectory:
+            # !!! REDO THIS LOOP?
+            waypoint: Waypoint = ego_state.waypoint
+            # Extract data from the waypoint
+            time_point = waypoint.time_point
+            oriented_box = waypoint.oriented_box
+            velocity = waypoint.velocity
+
+            # Create a dynamic car state with speed from velocity
+            speed = (velocity.x**2 + velocity.y**2)**0.5  # Calculate speed from velocity components
+
+            car_footprint = CarFootprint(
+                center=oriented_box.center,
+                vehicle_parameters=vehicle_parameters,
+            )
+
+            dynamic_car_state = DynamicCarState(
+                rear_axle_to_center_dist=vehicle_parameters.cog_position_from_rear_axle,
+                rear_axle_velocity_2d=StateVector2D(velocity.x, velocity.y),
+                rear_axle_acceleration_2d=StateVector2D(0, 0)  # Assuming no acceleration for simplicity
+            )
+
+            # Create an EgoState
+            ego_state = EgoState(
+                time_point=time_point,
+                car_footprint=car_footprint,
+                dynamic_car_state=dynamic_car_state,
+                tire_steering_angle=0.0,  # Assuming no steering angle for simplicity
+                is_in_auto_mode=True,
+            )
+
+            ego_states.append(ego_state)
+
+        # Create an interpolated trajectory with EgoState objects
+        return InterpolatedTrajectory(ego_states)
+
+    def sandbox_eval(self):
         """
-        Create a waypoint from a point.
-        :param point: The point to create the waypoint from.
-        :return: The created waypoint.
+        This function is for testing evaluation of states in the NuPlan simulator.
         """
-        pose = StateSE2(point.x, point.y, point.yaw)
-        oriented_box = OrientedBox(
-            pose,
-            width=self.ego_vehicle_oriented_box.width,
-            length=self.ego_vehicle_oriented_box.length,
-            height=self.ego_vehicle_oriented_box.height
-        )
-        return Waypoint(
-            time_point=point.time_point,
-            oriented_box=oriented_box,
-            velocity=point.velocity
-        )
