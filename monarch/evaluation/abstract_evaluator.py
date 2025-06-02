@@ -16,7 +16,7 @@ class AbstractEvaluator(metaclass=ABCMeta):
 
     @property
     @abstractmethod
-    def metrics(self):
+    def metrics(self) -> List[Metric]:
         """
         Return the different metric statistics implemented in the evaluator
         :return list of different metricStatistics

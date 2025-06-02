@@ -9,15 +9,7 @@ from torch.nn.modules.loss import _Loss
 
 from .abstract_planner import AbstractPlanner
 from ..types.state_types import EnvState, VehicleState, SystemState
-from ..types.action import Action, Trajectory, Waypoint
-from ..types.observation_type import Observation
-
-
-class RGBObservation(Observation):
-    """
-    Observation type for RGB images used by the reinforcement learning planner.
-    """
-    pass
+from ..types.trajectory import Trajectory, Waypoint
 
 
 class ReinforcementLearningPlanner(AbstractPlanner):
@@ -171,25 +163,11 @@ class ReinforcementLearningPlanner(AbstractPlanner):
         """
         return self.__class__.__name__
 
-    def observation_type(self) -> Type[Observation]:
-        """
-        Return the type of observation that this planner expects.
-        """
-        return RGBObservation
-
-    def compute_trajectory(self, current_input):
-        """
-        Computes the ego vehicle trajectory
-        :param current_input: Current input containing the system state
-        :return: Action containing the planned trajectory
-        """
-        return self.compute_planner_trajectory(current_input)
-
-    def compute_planner_trajectory(self, current_input) -> Action:
+    def compute_planner_trajectory(self, current_input) -> Trajectory:
         """
         Compute the trajectory based on the current environment state.
         :param current_input: The current environment state containing RGB image and depth information
-        :return: An Action object containing a trajectory with waypoints
+        :return: A Trajectory object containing a trajectory with waypoints
         """
         # Extract current state information with better error handling
         current_pos, timestamp, rgb_image, current_velocity = self._extract_state_info(current_input)
@@ -208,11 +186,10 @@ class ReinforcementLearningPlanner(AbstractPlanner):
             current_pos, steering_angle, acceleration, current_velocity, timestamp
         )
         
-        # Create trajectory and action
+        # Create trajectory
         trajectory = Trajectory(waypoints)
-        action = Action(trajectory)
         
-        return action
+        return trajectory
 
     def _extract_state_info(self, current_input) -> tuple[VehicleState, float, Optional[object], float]:
         """
@@ -374,7 +351,7 @@ class ReinforcementLearningPlanner(AbstractPlanner):
         actions_taken = actions_taken.to(self.device)
         rewards = rewards.to(self.device)
         
-        # Forward pass to get action probabilities
+        # Forward pass to get trajectory probabilities
         outputs = self.model(rgb_image)
         
         # Calculate log probabilities for the actions taken
@@ -418,7 +395,7 @@ class ReinforcementLearningPlanner(AbstractPlanner):
         """
         Train on an episode using evaluation-based rewards.
         
-        :param trajectory_data: List of dicts with keys 'rgb_image', 'action', 'reward'
+        :param trajectory_data: List of dicts with keys 'rgb_image', 'trajectory', 'reward'
         :return: Training statistics
         """
         if len(trajectory_data) == 0:
@@ -426,17 +403,17 @@ class ReinforcementLearningPlanner(AbstractPlanner):
         
         # Prepare data
         rgb_images = []
-        actions = []
+        trajectories = []
         rewards = []
         
         for data_point in trajectory_data:
             rgb_images.append(data_point['rgb_image'])
-            actions.append(data_point['action'])
+            trajectories.append(data_point['trajectory'])
             rewards.append(data_point['reward'])
         
         # Convert to tensors
         image_tensor = self._prepare_image_batch(rgb_images)
-        action_tensor = torch.tensor(actions, dtype=torch.float32)
+        trajectory_tensor = torch.tensor(trajectories, dtype=torch.float32)
         reward_tensor = torch.tensor(rewards, dtype=torch.float32)
         
         total_loss = 0.0
@@ -446,11 +423,11 @@ class ReinforcementLearningPlanner(AbstractPlanner):
             for i in range(0, len(trajectory_data), self.batch_size):
                 # Prepare batch
                 batch_images = image_tensor[i:i+self.batch_size]
-                batch_actions = action_tensor[i:i+self.batch_size]
+                batch_trajectories = trajectory_tensor[i:i+self.batch_size]
                 batch_rewards = reward_tensor[i:i+self.batch_size]
                 
                 # Train step with policy gradient
-                loss = self.train_step_from_evaluation(batch_images, batch_actions, batch_rewards)
+                loss = self.train_step_from_evaluation(batch_images, batch_trajectories, batch_rewards)
                 total_loss += loss
                 num_batches += 1
         
@@ -494,23 +471,23 @@ class ReinforcementLearningPlanner(AbstractPlanner):
             else:
                 last_state = prev_state
                 
-            env_state = environment.get_sensor_output(original_state, last_state, current_state)
+            env_state = environment.get_sensor_input(original_state, last_state, current_state)
             
             # Get RGB image
             if hasattr(env_state, 'rgb_image') and env_state.rgb_image is not None:
                 rgb_image = env_state.rgb_image
                 
-                # Predict action
-                steering_angle, acceleration = self._predict_actions(rgb_image)
+                # Predict trajectory
+                trajectory = self._predict_trajectory(rgb_image)
                 
                 # Normalize actions to [-1, 1] range for training
                 normalized_steering = steering_angle / self.max_steering_angle
                 normalized_accel = acceleration / self.max_acceleration
                 
                 # Generate and execute trajectory
-                action = self.compute_planner_trajectory(env_state)
-                trajectory_history.append(action)
-                simulator.do_action(action)
+                trajectory = self.compute_planner_trajectory(env_state)
+                trajectory_history.append(trajectory)
+                simulator.do_action(trajectory)
                 
                 # Get evaluation score
                 if len(trajectory_history) > 1:  # Need some history for evaluation
@@ -521,7 +498,7 @@ class ReinforcementLearningPlanner(AbstractPlanner):
                 # Store trajectory data
                 trajectory_data.append({
                     'rgb_image': rgb_image,
-                    'action': [normalized_steering, normalized_accel],
+                    'trajectory': trajectory,
                     'reward': reward,
                     'step': step
                 })
@@ -861,10 +838,10 @@ if __name__ == "__main__":
     )
     
     # Generate trajectory
-    action = planner.compute_planner_trajectory(env_state)
+    trajectory = planner.compute_planner_trajectory(env_state)
     
-    print(f"Generated trajectory with {len(action.trajectory.waypoints)} waypoints")
-    for i, waypoint in enumerate(action.trajectory.waypoints[:5]):  # Print first 5 waypoints
+    print(f"Generated trajectory with {len(trajectory.waypoints)} waypoints")
+    for i, waypoint in enumerate(trajectory.waypoints[:5]):  # Print first 5 waypoints
         print(f"Waypoint {i}: x={waypoint.x:.2f}, y={waypoint.y:.2f}, heading={waypoint.heading:.2f}")
     
     # Example training step

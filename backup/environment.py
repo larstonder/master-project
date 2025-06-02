@@ -33,7 +33,7 @@ class OmniRe:
         self.device = setup.device
         self.camera_matrix_cache = {}
 
-    def get_sensor_output(self, state: State) -> EnvState:
+    def get_sensor_input(self, state: State) -> EnvState:
         """
         Generate sensor output (RGB image) for the given simulation state.
 

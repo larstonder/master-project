@@ -65,7 +65,7 @@ class SimpleEnvironment(AbstractEnvironment):
     def __init__(self, image_size=(240, 320)):
         self.image_size = image_size
         
-    def get_sensor_output(self, original_state, last_state, current_state) -> EnvState:
+    def get_sensor_input(self, original_state, last_state, current_state) -> EnvState:
         """Generate sensor output with varying RGB patterns."""
         # Create a simple pattern that changes based on ego position
         x, y = current_state.ego_pos.x, current_state.ego_pos.y
@@ -251,7 +251,7 @@ def compare_training_methods():
         )
         
         state = SystemState(ego_pos, [], i * 0.1)
-        env_state = env.get_sensor_output(state, state, state)
+        env_state = env.get_sensor_input(state, state, state)
         rgb_images.append(env_state.rgb_image)
         
         # Simple target policy: steer toward origin
@@ -402,7 +402,7 @@ def run_simulation_demo(planner, steps=30):
         else:
             last_state = prev_state
             
-        env_state = environment.get_sensor_output(original_state, last_state, current_state)
+        env_state = environment.get_sensor_input(original_state, last_state, current_state)
         
         # Plan trajectory
         start_time = time.time()

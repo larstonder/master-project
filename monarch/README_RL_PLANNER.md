@@ -67,7 +67,7 @@ The planner expects RGB images from the environment:
 
 ```python
 # Environment provides sensor data including RGB images
-sensor_output = environment.get_sensor_output(original_state, last_state, current_state)
+sensor_output = environment.get_sensor_input(original_state, last_state, current_state)
 
 # RL planner processes the RGB image
 action = planner.compute_planner_trajectory(sensor_output)
@@ -141,7 +141,7 @@ def run_simulation(planner, simulator, environment, evaluator, n_steps):
     for step in range(n_steps):
         # Get state and sensor data
         current_state = simulator.get_state()
-        sensor_output = environment.get_sensor_output(...)
+        sensor_output = environment.get_sensor_input(...)
         
         # Plan and execute
         action = planner.compute_trajectory(sensor_output)

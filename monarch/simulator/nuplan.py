@@ -65,7 +65,7 @@ class NuPlan(AbstractSimulator):
     NOTE: https://github.com/motional/nuplan-devkit/blob/master/docs/metrics_description.md metrics description
     """
 
-    def __init__(self, scenario_name: str):
+    def __init__(self, scenario_name: str, start_timestamp_s: float = 1000.0):
         super().__init__()
         print("Initializing NuPlan simulator...")
         
@@ -89,7 +89,7 @@ class NuPlan(AbstractSimulator):
             map_names=None,
             num_scenarios_per_type=None,
             limit_total_scenarios=None,
-            timestamp_threshold_s=None,
+            timestamp_threshold_s=start_timestamp_s,
             ego_displacement_minimum_m=None,
             expand_scenarios=False,
             remove_invalid_goals=False,
@@ -169,8 +169,3 @@ class NuPlan(AbstractSimulator):
 
     def do_action(self, trajectory: AbstractTrajectory):
         self.simulation.propagate(trajectory)
-
-    def sandbox_eval(self):
-        """
-        This function is for testing evaluation of states in the NuPlan simulator.
-        """

@@ -169,14 +169,6 @@ class ReinforcedPlanner(AbstractPlanner):
         """
         return RGBObservation
 
-    def compute_trajectory(self, current_input):
-        """
-        Computes the ego vehicle trajectory
-        :param current_input: Current input containing the system state
-        :return: Action containing the planned trajectory
-        """
-        return self.compute_planner_trajectory(current_input)
-
     def compute_planner_trajectory(self, current_input) -> Action:
         """
         Compute the trajectory based on the current environment state.

@@ -25,7 +25,7 @@ class Environment:
     def __init__(self):
         pass
 
-    def get_sensor_output(self, state: State):
+    def get_sensor_input(self, state: State):
         """Generate sensor output for the given simulation state."""
         raise NotImplementedError("This method should be overridden by subclasses.")
 

@@ -2,6 +2,7 @@ from nuplan.planning.metrics.abstract_metric import AbstractMetricBuilder
 from nuplan.planning.scenario_builder.abstract_scenario import AbstractScenario
 from nuplan.planning.simulation.history.simulation_history import SimulationHistory
 from abstract_evaluator import AbstractEvaluator
+from ..types.new_format.metric import Metric
 
 
 class Evaluator(AbstractEvaluator):
@@ -22,7 +23,7 @@ class Evaluator(AbstractEvaluator):
         return self._name
 
     @property
-    def metrics(self):
+    def metrics(self) -> List[Metric]:
         """
         Return the different metric statistics implemented in the evaluator
         :return list of different metricStatistics
