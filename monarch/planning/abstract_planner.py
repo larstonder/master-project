@@ -2,8 +2,8 @@ from dataclasses import dataclass
 from typing import Type, Optional
 
 from abc import ABCMeta, abstractmethod
-from ..types.state_types import SystemState
-from ..types.trajectory import Trajectory
+from monarch.typings.state_types import SystemState
+from monarch.typings.trajectory import Trajectory
 
 class AbstractPlanner(metaclass=ABCMeta):
     """Interface for all planners"""

@@ -1,8 +1,8 @@
 from nuplan.planning.metrics.abstract_metric import AbstractMetricBuilder
 from nuplan.planning.scenario_builder.abstract_scenario import AbstractScenario
 from nuplan.planning.simulation.history.simulation_history import SimulationHistory
-from abstract_evaluator import AbstractEvaluator
-from ..types.new_format.metric import Metric
+from monarch.evaluation.abstract_evaluator import AbstractEvaluator
+from monarch.typings.metric import Metric
 
 
 class Evaluator(AbstractEvaluator):

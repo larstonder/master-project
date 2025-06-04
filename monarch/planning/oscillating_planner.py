@@ -1,7 +1,7 @@
 import os
 import math
 import numpy as np
-from typing import Type
+from typing import Type, List
 from nuplan.common.actor_state.ego_state import EgoState
 from nuplan.common.actor_state.state_representation import TimePoint
 from nuplan.common.actor_state.vehicle_parameters import (
@@ -25,8 +25,9 @@ from nuplan.planning.simulation.observation.observation_type import (
 from nuplan.planning.simulation.controller.motion_model.kinematic_bicycle import (
     KinematicBicycleModel,
 )
-from ..types.trajectory import Trajectory, Waypoint
-from .planner import Planner
+from monarch.typings.trajectory import Trajectory, Waypoint
+from monarch.planning.planner import Planner
+from monarch.typings.state_types import VehicleParameters, VehicleState, SystemState, EnvState
 
 NUPLAN_MAP_VERSION = os.getenv("NUPLAN_MAP_VERSION", "nuplan-maps-v1.0")
 
@@ -57,7 +58,7 @@ class OscillatingPlanner(Planner):
         - Might be able to remove self.vehicle param
         -- Did not find another motion model so the one in simple_planner is used.
         """
-        super().__init__(self.__class__.__name__), # Add Observation here 
+        super().__init__(self.__class__.__name__),  # Add Observation here
         # Init variables from params
         self.horizon_seconds = TimePoint(int(horizon_seconds * 1e6))
         self.sampling_time = TimePoint(int(sampling_time * 1e6))
@@ -71,51 +72,89 @@ class OscillatingPlanner(Planner):
         self.vehicle = get_pacifica_parameters()
         self.motion_model = KinematicBicycleModel(self.vehicle)
 
-
     def observation_type(self) -> Type[Observation]:
         """Inherited, see superclass"""
         return DetectionsTracks
 
     def compute_planner_trajectory(
-        self, current_input: PlannerInput
-    ) -> AbstractTrajectory:
-        static_velocity_magnitude = 2.0
+        self, env_state: EnvState, state_history: List[SystemState]
+    ) -> Trajectory:
+        """
+        Inherited, see superclass
+        """
+        target_speed = 2.0  # Target speed instead of static velocity
 
-        history = current_input.history
-        ego_state = history.ego_states[-1]
-        previous_ego_state = history.ego_states[
-            -2 if len(history.ego_states) > 1 else -1
+        current_time_point = state_history[-1].timestamp
+        current_ego = state_history[-1].ego_pos
+        previous_ego = state_history[-2 if len(state_history) > 1 else -1].ego_pos
+
+        trajectory_waypoints = [
+            Waypoint(
+                current_ego.x,
+                current_ego.y,
+                current_ego.heading,
+                current_ego.vehicle_parameters.vx,
+                current_ego.vehicle_parameters.vy,
+                current_time_point,
+            )
         ]
 
-        trajectory: list[EgoState] = [ego_state]
-        current_steering_angle = ego_state.tire_steering_angle
-        previous_steering_angle = previous_ego_state.tire_steering_angle
-        for i in range(int(self.horizon_seconds.time_us / self.sampling_time.time_us)):
+        current_x, current_y, current_heading = (
+            current_ego.x,
+            current_ego.y,
+            current_ego.heading,
+        )
+        current_vx, current_vy = (
+            current_ego.vehicle_parameters.vx,
+            current_ego.vehicle_parameters.vy,
+        )
+        current_steering_angle = current_ego.vehicle_parameters.steering_angle
+        previous_steering_angle = previous_ego.vehicle_parameters.steering_angle
+
+        num_steps = int(self.horizon_seconds.time_us / self.sampling_time.time_us)
+        dt = self.sampling_time.time_us / 1e6
+
+        for i in range(num_steps):
             new_steering_angle = self._get_new_steering_angle(
                 current_steering_angle, previous_steering_angle
             )
 
-            split_state = ego_state.to_split_state()
-            split_state.linear_states[-1] = new_steering_angle
-            split_state.linear_states[3] = static_velocity_magnitude * math.cos(
-                new_steering_angle
-            )
-            split_state.linear_states[4] = static_velocity_magnitude * math.sin(
-                new_steering_angle
-            )
-            split_state.linear_states[5] = 0
-            split_state.linear_states[6] = 0
+            # Update dynamics using bicycle model
+            current_speed = math.sqrt(current_vx**2 + current_vy**2)
+            if current_speed < target_speed:
+                # Simple speed controller
+                current_speed = min(current_speed + 1.0 * dt, target_speed)
 
-            state = EgoState.from_split_state(split_state)
-            state = self.motion_model.propagate_state(
-                state, state.dynamic_car_state, self.sampling_time
+            # Update heading and position
+            angular_velocity = (
+                current_speed * math.tan(new_steering_angle)
+            ) / get_pacifica_parameters().wheel_base
+            current_heading += angular_velocity * dt
+
+            current_vx = current_speed * math.cos(current_heading)
+            current_vy = current_speed * math.sin(current_heading)
+
+            current_x += current_vx * dt
+            current_y += current_vy * dt
+
+            current_time_point = current_time_point + (self.sampling_time * 1e6)
+
+            trajectory_waypoints.append(
+                Waypoint(
+                    current_x,
+                    current_y,
+                    current_heading,
+                    current_vx,
+                    current_vy,
+                    angular_velocity,
+                    current_time_point,
+                )
             )
-            center = state.waypoint.oriented_box.center
-            trajectory.append(Waypoint(center.x, center.y, state.waypoint.heading))
 
             previous_steering_angle = current_steering_angle
             current_steering_angle = new_steering_angle
-        return Trajectory(trajectory)
+
+        return Trajectory(trajectory_waypoints)
 
     def _get_new_steering_angle(
         self, current_steering_angle: float, previous_steering_angle: float

@@ -1,6 +1,6 @@
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass
-from ..types.state_types import SystemState, EnvState
+from monarch.typings.state_types import SystemState, EnvState
 
 class AbstractRenderer(metaclass=ABCMeta):
     @property
@@ -9,6 +9,13 @@ class AbstractRenderer(metaclass=ABCMeta):
         """
         Get the name of the renderer
         :return: Name of the renderer
+        """
+        pass
+
+    @abstractmethod
+    def reset(self):
+        """
+        Reset the renderer
         """
         pass
     

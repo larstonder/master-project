@@ -16,76 +16,19 @@ from pathlib import Path
 from omegaconf import OmegaConf
 from typing import Dict
 from scipy.spatial.transform import Rotation as R
-from ..types.state_types import SystemState, EnvState, VehicleState
-from ..utils.path_utils import local_import_context, use_path
-from ..utils.misc import import_str  # pylint: disable=import-error
-from .renderer import Renderer
+from monarch.typings.state_types import SystemState, EnvState, VehicleState
+from monarch.utils.path_utils import local_import_context, use_path
+from monarch.utils.misc import import_str  # pylint: disable=import-error
+from monarch.rendering.renderer import Renderer
 
-with local_import_context("../master-project/drivestudio", True):
-    # print current working directory    
-    from datasets.driving_dataset import DrivingDataset  # py
+with local_import_context("./drivestudio", True):
+    from datasets.driving_dataset import DrivingDataset
     from datasets.base.pixel_source import get_rays
     from models.trainers.scene_graph import MultiTrainer
 
 CORRECTION_MATRIX = np.array([[-0.90322894,  0.42915905,  0.        ],
                               [-0.42915905, -0.90322894,  0.        ],
                               [ 0.,          0.,          1.        ]])
-
-class OmniReSetup:
-    """
-    OmniReSetup class that initializes the environment model with a trained neural renderer.
-    It loads the configuration and checkpoint files, sets up the device,
-    and prepares the dataset for rendering.
-    """
-
-    def __init__(
-        self,
-        data_path: str,
-        checkpoint_path: str,
-        cam_id: int = 0,
-        start_timestep: int = 0,
-    ):
-        self.data_path = Path(data_path)
-        print(f"Loading data from: {data_path}")
-
-        self.cam_id = cam_id
-        self.start_timestep = start_timestep
-
-        print(f"Data loaded.")
-
-        self.raw_checkpoint_path = Path(checkpoint_path)
-        self.checkpoint_path = self.raw_checkpoint_path / "config.yaml"
-
-        print(f"Loading checkpoint from: {self.raw_checkpoint_path}")
-
-
-        self.cfg = OmegaConf.load(self.checkpoint_path)
-
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        self.dataset = DrivingDataset(data_cfg=self.cfg.data)
-
-        print(f"Initializing trainer {self.cfg.trainer.type}")
-        
-        self.trainer = MultiTrainer(
-            **self.cfg.trainer,
-            num_timesteps=self.dataset.num_img_timesteps,
-            model_config=self.cfg.model,
-            num_train_images=len(self.dataset.train_image_set),
-            num_full_images=len(self.dataset.full_image_set),
-            test_set_indices=self.dataset.test_timesteps,
-            scene_aabb=self.dataset.get_aabb().reshape(2, 3),
-            device=self.device,
-        )
-
-        ckpt_path = self.raw_checkpoint_path / "checkpoint_final.pth"
-
-        # Load checkpoint
-        self.trainer.resume_from_checkpoint(ckpt_path=ckpt_path, load_only_model=True)
-
-        print(
-            f"Resuming from checkpoint: {ckpt_path}, starting at step {self.trainer.step}"
-        )
 
 class OmniRe(Renderer):
     """
@@ -103,11 +46,13 @@ class OmniRe(Renderer):
         cam_id: int = 0,
         start_timestep: int = 0,
     ):
+        print(f"Initializing OmniRe renderer with data path: {data_path} and checkpoint path: {checkpoint_path}")
         self.data_path = Path(data_path)
         self.raw_checkpoint_path = Path(checkpoint_path)
         self.cam_id = cam_id
         self.start_timestep = start_timestep
         self.initialize()
+        print("OmniRe renderer initialized successfully")
     
     def initialize(self):
         self.checkpoint_path = self.raw_checkpoint_path / "config.yaml"
@@ -116,10 +61,11 @@ class OmniRe(Renderer):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.dataset = DrivingDataset(data_cfg=self.cfg.data)
-        self._initialize_trainer()
+        
+        self.reset()
         self._initialize_frame_data()
 
-    def _initialize_trainer(self):
+    def reset(self):
         print(f"Initializing trainer {self.cfg.trainer.type}")
         
         self.trainer = MultiTrainer(
@@ -132,7 +78,7 @@ class OmniRe(Renderer):
             scene_aabb=self.dataset.get_aabb().reshape(2, 3),
             device=self.device,
         )
-
+        
         ckpt_path = self.raw_checkpoint_path / "checkpoint_final.pth"
 
         # Load checkpoint

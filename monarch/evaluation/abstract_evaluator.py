@@ -1,5 +1,7 @@
 from abc import ABCMeta, abstractmethod
 from nuplan.planning.metrics.abstract_metric import AbstractMetricBuilder
+from typing import List
+from monarch.typings.metric import Metric
 
 
 class AbstractEvaluator(metaclass=ABCMeta):

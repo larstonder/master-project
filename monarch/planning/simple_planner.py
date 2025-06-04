@@ -1,7 +1,11 @@
-from .planner import Planner
-from monarch.types.trajectory import Trajectory
-from monarch.types.planner_input import PlannerInput
 import numpy as np
+from monarch.planning.planner import Planner
+from monarch.typings.trajectory import Trajectory
+from monarch.typings.planner_input import PlannerInput
+from monarch.typings.state_types import SystemState, EnvState, VehicleState, VehicleParameters
+from monarch.typings.waypoint import Waypoint
+import math
+from typing import List
 
 class SimplePlanner(Planner):
     """
@@ -24,37 +28,52 @@ class SimplePlanner(Planner):
         self.max_velocity = max_velocity
         self.steering_angle = steering_angle
         
-    def compute_planner_trajectory(self, current_input: PlannerInput) -> Trajectory:
-        """
-        Computes the trajectory of the vehicle.
-        :param current_input: [PlannerInput] current input of the vehicle.
-        :return: [Trajectory] trajectory of the vehicle.
-        """
+    def compute_planner_trajectory(self, env_state: EnvState, state_history: List[SystemState]) -> Trajectory:
         """
         Computes the trajectory of the vehicle driving straight ahead.
-        :param current_input: [PlannerInput] current input of the vehicle.
+        :param env_state: [EnvState] current environment state.
+        :param state_history: [List[SystemState]] history of system states.
         :return: [Trajectory] trajectory of the vehicle.
         """
-        # Get the current state
-        history = current_input.history
-        ego_state = history.ego_states[-1]
-        x, y = ego_state.rear_axle.x, ego_state.rear_axle.y
-        heading = ego_state.rear_axle.heading
-        velocity = ego_state.dynamic_car_state.rear_axle_velocity_2d.x
+        # Get the current ego state from the latest system state
+        current_ego = state_history[-1].ego_pos
+        current_time_point = state_history[-1].timestamp
+        # Extract current state values
+        x, y = current_ego.x, current_ego.y
+        heading = current_ego.heading
+        
+        # Use current velocity or calculate from vx, vy if available
+        if hasattr(current_ego, 'vx') and hasattr(current_ego, 'vy'):
+            velocity = math.sqrt(current_ego.vx**2 + current_ego.vy**2)
+        else:
+            # Fallback if velocity fields aren't available
+            velocity = 0.0
+            
+        vx = current_ego.vehicle_parameters.vx
+        vy = current_ego.vehicle_parameters.vy
+        
+        angular_velocity = current_ego.vehicle_parameters.angular_velocity
 
-        # Prepare trajectory
-        trajectory = []
+        # Prepare trajectory starting with current position
+        trajectory = [Waypoint(x, y, heading, vx, vy, angular_velocity, current_time_point)]
         time_steps = int(self.horizon_seconds / self.sampling_time)
         dt = self.sampling_time
 
         for i in range(time_steps):
             # Accelerate up to max_velocity
             velocity = min(velocity + self.acceleration[0] * dt, self.max_velocity)
-            # Move straight ahead
-            x += velocity * np.cos(heading) * dt
-            y += velocity * np.sin(heading) * dt
-            # Always use the same heading (straight)
-            trajectory.append(Waypoint(x, y, heading))
+            
+            # Move straight ahead (no steering angle change for simple planner)
+            x += velocity * math.cos(heading) * dt
+            y += velocity * math.sin(heading) * dt
+            
+            vx = velocity * math.cos(heading)
+            vy = velocity * math.sin(heading)
+            
+            timepoint = current_time_point + i * dt * 1e6
+            
+            # Keep the same heading (straight driving)
+            trajectory.append(Waypoint(x, y, heading, vx, vy, angular_velocity, timepoint))
 
         return Trajectory(trajectory)
         

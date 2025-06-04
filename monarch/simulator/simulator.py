@@ -1,5 +1,5 @@
-from simulator.abstract_simulator import AbstractSimulator
-from ..types.state_types import SystemState
+from monarch.simulator.abstract_simulator import AbstractSimulator
+from monarch.typings.state_types import SystemState
 
 class Simulator(AbstractSimulator):
     def __init__(self, scenario, simulation): # Define scenario and simulation as classes in types folder
@@ -13,6 +13,10 @@ class Simulator(AbstractSimulator):
     @property
     def simulation(self):
         return self._simulation
+    
+    def reset(self):
+        """Inherited, see superclass"""
+        raise NotImplementedError("This method should be overridden in subclasses.")
 
     def get_state(self) -> SystemState: # Define SystemState as a class in types folder
         """Inherited, see superclass"""

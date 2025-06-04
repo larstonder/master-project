@@ -7,9 +7,10 @@ from typing import Type, Optional, Union, List, Any
 from torch.optim import Optimizer
 from torch.nn.modules.loss import _Loss
 
-from .abstract_planner import AbstractPlanner
-from ..types.state_types import EnvState, VehicleState, SystemState
-from ..types.trajectory import Trajectory, Waypoint
+from nuplan.common.actor_state.vehicle_parameters import get_pacifica_parameters
+from monarch.planning.abstract_planner import AbstractPlanner
+from monarch.typings.state_types import EnvState, VehicleState, SystemState, VehicleParameters
+from monarch.typings.trajectory import Trajectory, Waypoint
 
 
 class ReinforcementLearningPlanner(AbstractPlanner):
@@ -25,7 +26,6 @@ class ReinforcementLearningPlanner(AbstractPlanner):
     :param base_velocity: Base velocity for the vehicle when acceleration is 0
     :param max_steering_angle: Maximum steering angle in radians
     :param max_acceleration: Maximum acceleration in m/s²
-    :param wheelbase: Vehicle wheelbase for bicycle model (meters)
     :param linear_width: width of the linear layer before output
     :param batch_size: Batch size for training
     :param num_epochs: Number of epochs for training
@@ -43,7 +43,6 @@ class ReinforcementLearningPlanner(AbstractPlanner):
         base_velocity: float = 5.0,
         max_steering_angle: float = math.pi / 6,  # 30 degrees
         max_acceleration: float = 3.0,  # m/s²
-        wheelbase: float = 2.7,  # meters, typical car wheelbase
         image_dimension: tuple[int, int] = (360, 640), 
         linear_width: int = 512, 
         batch_size: int = 1,
@@ -73,7 +72,7 @@ class ReinforcementLearningPlanner(AbstractPlanner):
         self.base_velocity = base_velocity
         self.max_steering_angle = max_steering_angle
         self.max_acceleration = max_acceleration
-        self.wheelbase = wheelbase
+        self.wheelbase = get_pacifica_parameters().wheel_base
         
         # Initialize the neural network
         self.model = self._build_model()
@@ -163,14 +162,30 @@ class ReinforcementLearningPlanner(AbstractPlanner):
         """
         return self.__class__.__name__
 
-    def compute_planner_trajectory(self, current_input) -> Trajectory:
+    def observation_type(self) -> Type:
+        """Inherited, see superclass"""
+        # Return a generic type since we don't use specific observation types like DetectionsTracks
+        return EnvState
+
+    def compute_planner_trajectory(self, env_state: EnvState, state_history: List[SystemState]) -> Trajectory:
         """
         Compute the trajectory based on the current environment state.
-        :param current_input: The current environment state containing RGB image and depth information
+        :param env_state: The current environment state containing RGB image and depth information
+        :param state_history: List of system states with ego position and vehicle parameters
         :return: A Trajectory object containing a trajectory with waypoints
         """
-        # Extract current state information with better error handling
-        current_pos, timestamp, rgb_image, current_velocity = self._extract_state_info(current_input)
+        # Extract current state information from state_history
+        current_system_state = state_history[-1]
+        current_pos = current_system_state.ego_pos
+        timestamp = current_system_state.timestamp
+        
+        # Get RGB image from env_state
+        rgb_image = getattr(env_state, 'rgb_image', None)
+        
+        # Get current velocity from vehicle parameters
+        current_velocity = math.sqrt(
+            current_pos.vehicle_parameters.vx**2 + current_pos.vehicle_parameters.vy**2
+        ) if hasattr(current_pos, 'vehicle_parameters') else self.base_velocity
         
         if rgb_image is None:
             # If no RGB image is available, use a default policy (e.g., go straight)
@@ -191,40 +206,22 @@ class ReinforcementLearningPlanner(AbstractPlanner):
         
         return trajectory
 
-    def _extract_state_info(self, current_input) -> tuple[VehicleState, float, Optional[object], float]:
+    def _calculate_angular_velocity_from_steering(self, velocity: float, steering_angle: float) -> float:
         """
-        Extract state information from different input types.
+        Calculate angular velocity using bicycle model from velocity and steering angle.
         
-        :param current_input: Input state (SystemState, EnvState, or other)
-        :return: Tuple of (current_pos, timestamp, rgb_image, current_velocity)
+        :param velocity: Current velocity in m/s
+        :param steering_angle: Steering angle in radians
+        :return: Angular velocity in rad/s
         """
-        if hasattr(current_input, 'ego_pos'):
-            # SystemState input
-            current_pos = current_input.ego_pos
-            timestamp = current_input.timestamp
-            rgb_image = getattr(current_input, 'rgb_image', None)
-            # Try to get velocity from ego_pos, fallback to base_velocity
-            current_velocity = getattr(current_pos, 'velocity', self.base_velocity)
-        elif hasattr(current_input, 'rgb_image'):
-            # EnvState input
-            rgb_image = current_input.rgb_image
-            timestamp = getattr(current_input, 'timestamp', time.time())
-            current_pos = VehicleState(0.0, 0.0, 0.0, 0.0, 0)
-            current_velocity = self.base_velocity
-        elif hasattr(current_input, 'timestamp'):
-            # Generic input with timestamp
-            timestamp = current_input.timestamp
-            rgb_image = getattr(current_input, 'rgb_image', None)
-            current_pos = VehicleState(0.0, 0.0, 0.0, 0.0, 0)
-            current_velocity = self.base_velocity
+        if abs(steering_angle) > 1e-6 and velocity > 0.1:  # Avoid division by zero
+            turn_radius = self.wheelbase / math.tan(abs(steering_angle))
+            angular_velocity = velocity / turn_radius
+            if steering_angle < 0:
+                angular_velocity = -angular_velocity
+            return angular_velocity
         else:
-            # Fallback for unknown input types
-            timestamp = time.time()
-            rgb_image = getattr(current_input, 'rgb_image', None)
-            current_pos = VehicleState(0.0, 0.0, 0.0, 0.0, 0)
-            current_velocity = self.base_velocity
-            
-        return current_pos, timestamp, rgb_image, current_velocity
+            return 0.0
 
     def _predict_actions(self, rgb_image) -> tuple[float, float]:
         """
@@ -284,12 +281,13 @@ class ReinforcementLearningPlanner(AbstractPlanner):
     ) -> List[Waypoint]:
         """
         Generate trajectory waypoints using bicycle model for more realistic vehicle dynamics.
+        Enhanced with proper angular velocity calculation and tracking.
         
         :param current_pos: Current vehicle position
         :param steering_angle: Steering angle command in radians
         :param acceleration: Acceleration command in m/s²
         :param current_velocity: Current vehicle velocity
-        :param timestamp: Current timestamp
+        :param timestamp: Current timestamp in microseconds
         :return: List of waypoints forming the trajectory
         """
         waypoints = []
@@ -303,32 +301,51 @@ class ReinforcementLearningPlanner(AbstractPlanner):
         heading = current_pos.heading if hasattr(current_pos, 'heading') else 0.0
         velocity = current_velocity
         
+        # Initialize angular velocity from current state or calculate from steering
+        if hasattr(current_pos.vehicle_parameters, 'angular_velocity'):
+            current_angular_velocity = current_pos.vehicle_parameters.angular_velocity
+        else:
+            current_angular_velocity = self._calculate_angular_velocity_from_steering(velocity, steering_angle)
+        
         for i in range(num_steps + 1):
-            # Create waypoint at current position
-            waypoint = Waypoint(x, y, heading)
+            # Calculate velocity components at current state
+            vx = velocity * math.cos(heading)
+            vy = velocity * math.sin(heading)
+            current_timestamp = timestamp + i * self.sampling_time * 1e6
+            
+            # Create waypoint at current position with all required parameters
+            # Note: Waypoint constructor expects (x, y, heading, vx, vy, angular_velocity, timestamp)
+            waypoint = Waypoint(x, y, heading, vx, vy, current_angular_velocity, current_timestamp)
             waypoints.append(waypoint)
             
             if i < num_steps:  # Don't update on the last iteration
                 # Update velocity using acceleration
-                velocity += acceleration * self.sampling_time
-                velocity = max(0.1, min(velocity, 25.0))  # Clamp velocity to reasonable range
+                new_velocity = velocity + acceleration * self.sampling_time
+                new_velocity = max(0.1, min(new_velocity, 25.0))  # Clamp velocity to reasonable range
                 
-                # Bicycle model kinematics
-                # Calculate turn radius based on steering angle and wheelbase
-                if abs(steering_angle) > 1e-6:  # Avoid division by zero
-                    turn_radius = self.wheelbase / math.tan(abs(steering_angle))
-                    angular_velocity = velocity / turn_radius
-                    if steering_angle < 0:
-                        angular_velocity = -angular_velocity
-                else:
-                    angular_velocity = 0.0
+                # Calculate angular velocity using bicycle model
+                angular_velocity = self._calculate_angular_velocity_from_steering(new_velocity, steering_angle)
                 
-                # Update heading
+                # Smooth angular velocity changes to avoid jerky motion
+                alpha = 0.7  # Smoothing factor
+                angular_velocity = alpha * angular_velocity + (1 - alpha) * current_angular_velocity
+                
+                # Update heading using calculated angular velocity
                 heading += angular_velocity * self.sampling_time
                 
-                # Update position
-                x += velocity * math.cos(heading) * self.sampling_time
-                y += velocity * math.sin(heading) * self.sampling_time
+                # Normalize heading to [-pi, pi]
+                while heading > math.pi:
+                    heading -= 2 * math.pi
+                while heading < -math.pi:
+                    heading += 2 * math.pi
+                
+                # Update position using new velocity and heading
+                x += new_velocity * math.cos(heading) * self.sampling_time
+                y += new_velocity * math.sin(heading) * self.sampling_time
+                
+                # Update for next iteration
+                velocity = new_velocity
+                current_angular_velocity = angular_velocity
         
         return waypoints
 
@@ -443,18 +460,19 @@ class ReinforcementLearningPlanner(AbstractPlanner):
             'min_reward': torch.min(reward_tensor).item()
         }
 
-    def collect_trajectory_for_training(self, simulator, environment, evaluator, steps: int = 50) -> List[dict]:
+    def collect_trajectory_for_training(self, simulator, renderer, evaluator, steps: int = 50) -> List[dict]:
         """
         Collect a trajectory by running the current policy and getting evaluation feedback.
         
         :param simulator: Simulator instance
-        :param environment: Environment instance  
+        :param renderer: Renderer instance  
         :param evaluator: Evaluator instance
         :param steps: Number of steps to collect
         :return: List of trajectory data points
         """
         trajectory_data = []
         trajectory_history = []
+        state_history = []
         
         # Initialize if needed
         if not hasattr(self, '_initialization'):
@@ -463,6 +481,7 @@ class ReinforcementLearningPlanner(AbstractPlanner):
         for step in range(steps):
             # Get current state
             current_state = simulator.get_state()
+            state_history.append(current_state)
             
             # Get sensor data
             if step == 0:
@@ -471,21 +490,39 @@ class ReinforcementLearningPlanner(AbstractPlanner):
             else:
                 last_state = prev_state
                 
-            env_state = environment.get_sensor_input(original_state, last_state, current_state)
+            env_state = renderer.get_sensor_input(original_state, last_state, current_state)
             
             # Get RGB image
             if hasattr(env_state, 'rgb_image') and env_state.rgb_image is not None:
                 rgb_image = env_state.rgb_image
                 
-                # Predict trajectory
-                trajectory = self._predict_trajectory(rgb_image)
+                # Predict trajectory using the new interface
+                trajectory = self.compute_planner_trajectory(env_state, state_history)
+                
+                # Extract steering angle and acceleration from the trajectory for training data
+                # We'll use the first few waypoints to estimate the actions taken
+                if len(trajectory.waypoints) >= 2:
+                    # Calculate steering angle from trajectory curvature
+                    wp1, wp2 = trajectory.waypoints[0], trajectory.waypoints[1]
+                    heading_diff = wp2.heading - wp1.heading
+                    steering_angle = heading_diff / self.sampling_time  # Approximate steering rate
+                    steering_angle = max(-self.max_steering_angle, min(self.max_steering_angle, steering_angle))
+                    
+                    # Calculate acceleration from velocity change
+                    current_velocity = math.sqrt(current_state.ego_pos.vehicle_parameters.vx**2 + 
+                                               current_state.ego_pos.vehicle_parameters.vy**2)
+                    # For simplicity, use a default acceleration towards target speed
+                    target_speed = 2.0
+                    acceleration = (target_speed - current_velocity) / self.sampling_time
+                    acceleration = max(-self.max_acceleration, min(self.max_acceleration, acceleration))
+                else:
+                    steering_angle = 0.0
+                    acceleration = 0.0
                 
                 # Normalize actions to [-1, 1] range for training
                 normalized_steering = steering_angle / self.max_steering_angle
                 normalized_accel = acceleration / self.max_acceleration
                 
-                # Generate and execute trajectory
-                trajectory = self.compute_planner_trajectory(env_state)
                 trajectory_history.append(trajectory)
                 simulator.do_action(trajectory)
                 
@@ -498,7 +535,7 @@ class ReinforcementLearningPlanner(AbstractPlanner):
                 # Store trajectory data
                 trajectory_data.append({
                     'rgb_image': rgb_image,
-                    'trajectory': trajectory,
+                    'trajectory': [normalized_steering, normalized_accel],
                     'reward': reward,
                     'step': step
                 })
@@ -507,12 +544,12 @@ class ReinforcementLearningPlanner(AbstractPlanner):
         
         return trajectory_data
 
-    def train_with_evaluation(self, simulator, environment, evaluator, num_episodes: int = 10, steps_per_episode: int = 50) -> dict:
+    def train_with_evaluation(self, simulator, renderer, evaluator, num_episodes: int = 10, steps_per_episode: int = 50) -> dict:
         """
         Train the RL planner using evaluation-based rewards.
         
         :param simulator: Simulator instance
-        :param environment: Environment instance
+        :param renderer: Renderer instance
         :param evaluator: Evaluator instance
         :param num_episodes: Number of training episodes
         :param steps_per_episode: Steps per episode
@@ -528,7 +565,7 @@ class ReinforcementLearningPlanner(AbstractPlanner):
             
             # Collect trajectory data
             trajectory_data = self.collect_trajectory_for_training(
-                simulator, environment, evaluator, steps_per_episode
+                simulator, renderer, evaluator, steps_per_episode
             )
             
             if len(trajectory_data) == 0:
@@ -837,8 +874,19 @@ if __name__ == "__main__":
         depth=np.zeros((240, 320))
     )
     
+    # Create a dummy system state for state_history
+    dummy_vehicle_params = VehicleParameters(vx=5.0, vy=0.0, steering_angle=0.0)
+    dummy_ego_pos = VehicleState(x=0.0, y=0.0, heading=0.0, velocity=5.0, timestamp=0)
+    dummy_ego_pos.vehicle_parameters = dummy_vehicle_params
+    
+    dummy_system_state = SystemState(
+        ego_pos=dummy_ego_pos,
+        timestamp=0.0
+    )
+    state_history = [dummy_system_state]
+    
     # Generate trajectory
-    trajectory = planner.compute_planner_trajectory(env_state)
+    trajectory = planner.compute_planner_trajectory(env_state, state_history)
     
     print(f"Generated trajectory with {len(trajectory.waypoints)} waypoints")
     for i, waypoint in enumerate(trajectory.waypoints[:5]):  # Print first 5 waypoints

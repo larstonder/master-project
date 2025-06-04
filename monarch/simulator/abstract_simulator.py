@@ -1,8 +1,8 @@
 from abc import ABCMeta, abstractmethod
-from ..types.trajectory import Trajectory
-from ..types.scenario import Scenario
-from ..types.simulation import Simulation
-from ..types.state_types import SystemState
+from monarch.typings.trajectory import Trajectory
+from monarch.typings.scenario import Scenario
+from monarch.typings.simulation import Simulation
+from monarch.typings.state_types import SystemState
 
 class AbstractSimulator(metaclass=ABCMeta):
     """Interface for class Simulator"""
@@ -16,6 +16,11 @@ class AbstractSimulator(metaclass=ABCMeta):
     @abstractmethod
     def simulation(self) -> Simulation:
         """Get the simulation instance."""
+        pass
+
+    @abstractmethod
+    def reset(self):
+        """Reset the simulator."""
         pass
 
     @abstractmethod

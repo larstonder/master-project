@@ -1,9 +1,10 @@
-from typing import Type
-from .abstract_planner import AbstractPlanner
-from ..types.trajectory import Trajectory
+from typing import List
+from monarch.typings.state_types import SystemState, EnvState
+from monarch.planning.abstract_planner import AbstractPlanner
+from monarch.typings.trajectory import Trajectory
 
 class Planner(AbstractPlanner):
-    def __init__(self, name: str, initialization_params = None): # Might need to remove Observation
+    def __init__(self, name: str, initialization_params = None):
         """
         Constructor for Planner
         :param name: Name of the planner
@@ -21,7 +22,7 @@ class Planner(AbstractPlanner):
         return self._name
 
 
-    def compute_planner_trajectory(self, current_input) -> Trajectory:
+    def compute_planner_trajectory(self, env_state: EnvState, state_history: List[SystemState]) -> Trajectory:
         """
         Inherited, see superclass
         """
