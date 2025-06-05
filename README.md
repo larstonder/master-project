@@ -60,15 +60,19 @@ pip install matplotlib
 pip install opencv-python
 ```
 
-<!-- ### Environment Setup
-Set the following environment variables for NuPlan integration:
+### Environment Setup
+To use the example implementations of nuPlan and OmniRe, the following environment variables must be set for NuPlan integration:
 
 ```bash
 export NUPLAN_DATA_ROOT="/path/to/nuplan/data"
 export NUPLAN_MAPS_ROOT="/path/to/nuplan/maps"  
 export NUPLAN_DB_FILES="/path/to/nuplan/splits"
 export NUPLAN_MAP_VERSION="nuplan-maps-v1.0"
-``` -->
+```
+
+Also, the nuPlan devkit should be installed according to the [nuplan-devkit](https://github.com/motional/nuplan-devkit/) documentation.
+
+To use OmniRe, the model should be trained on OmniRe data using the preprocessing and training pipeline outlined in the [Drivestudio](https://github.com/larstonder/drivestudio/) fork.
 
 ## Quick Start
 
