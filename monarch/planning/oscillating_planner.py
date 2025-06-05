@@ -144,13 +144,13 @@ class OscillatingPlanner(Planner):
 
             trajectory_waypoints.append(
                 Waypoint(
-                    current_x,
-                    current_y,
-                    current_heading,
-                    current_vx,
-                    current_vy,
-                    angular_velocity,
-                    current_time_point,
+                    x=current_x,
+                    y=current_y,
+                    heading=current_heading,
+                    vx=current_vx,
+                    vy=current_vy,
+                    angular_velocity=angular_velocity,
+                    timestamp=current_time_point,
                 )
             )
 
