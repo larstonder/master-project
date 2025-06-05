@@ -44,7 +44,9 @@ class OscillatingPlanner(Planner):
         self,
         horizon_seconds: int,
         sampling_time: float,
+        max_velocity: float,
         max_steering_angle: float,
+        acceleration: np.array,
         steering_angle_increment: float,
     ):
         """
@@ -62,6 +64,7 @@ class OscillatingPlanner(Planner):
         # Init variables from params
         self.horizon_seconds = TimePoint(int(horizon_seconds * 1e6))
         self.sampling_time = TimePoint(int(sampling_time * 1e6))
+        self.max_velocity = max_velocity
         self.max_steering_angle = max_steering_angle
         self.steering_angle_increment = steering_angle_increment
 

@@ -1,9 +1,7 @@
 import numpy as np
 from monarch.planning.planner import Planner
-from monarch.typings.trajectory import Trajectory
-from monarch.typings.planner_input import PlannerInput
+from monarch.typings.trajectory import Trajectory, Waypoint
 from monarch.typings.state_types import SystemState, EnvState, VehicleState, VehicleParameters
-from monarch.typings.waypoint import Waypoint
 import math
 from typing import List
 
@@ -70,7 +68,7 @@ class SimplePlanner(Planner):
             vx = velocity * math.cos(heading)
             vy = velocity * math.sin(heading)
             
-            timepoint = current_time_point + i * dt * 1e6
+            timepoint = current_time_point + (i+1) * dt * 1e6
             
             # Keep the same heading (straight driving)
             trajectory.append(Waypoint(x, y, heading, vx, vy, angular_velocity, timepoint))

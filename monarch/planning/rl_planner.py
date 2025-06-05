@@ -88,12 +88,20 @@ class ReinforcementLearningPlanner(AbstractPlanner):
 
     def _create_optimizer(self):
         """Create optimizer with model parameters."""
+        # Get all trainable parameters
+        params = list(self.model.parameters())
+        if hasattr(self, 'log_std'):
+            params.append(self.log_std)
+            
+        # FIXED: Increase learning rate for faster learning 
+        effective_lr = self.lr * 2.0  # Double the learning rate
+            
         if self.optimizer_type.lower() == "adam":
-            self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
+            self.optimizer = torch.optim.Adam(params, lr=effective_lr)
         elif self.optimizer_type.lower() == "sgd":
-            self.optimizer = torch.optim.SGD(self.model.parameters(), lr=self.lr, momentum=0.9)
+            self.optimizer = torch.optim.SGD(params, lr=effective_lr, momentum=0.9)
         elif self.optimizer_type.lower() == "adamw":
-            self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.lr)
+            self.optimizer = torch.optim.AdamW(params, lr=effective_lr)
         else:
             raise ValueError(f"Unsupported optimizer type: {self.optimizer_type}")
 
@@ -368,31 +376,75 @@ class ReinforcementLearningPlanner(AbstractPlanner):
         actions_taken = actions_taken.to(self.device)
         rewards = rewards.to(self.device)
         
-        # Forward pass to get trajectory probabilities
-        outputs = self.model(rgb_image)
+        # Forward pass to get predicted actions (policy means)
+        predicted_actions = self.model(rgb_image)
         
-        # Calculate log probabilities for the actions taken
-        # Since we use tanh output, we need to handle the continuous action space
-        # Use a Gaussian policy assumption with fixed variance
-        action_variance = 0.1  # Fixed variance for simplicity
+        # Use a learnable standard deviation for better exploration
+        if not hasattr(self, 'log_std'):
+            self.log_std = nn.Parameter(torch.zeros(self.output_dimension).to(self.device))
         
-        # Calculate negative log likelihood (assuming Gaussian distribution)
-        log_probs = -0.5 * torch.sum(((outputs - actions_taken) ** 2) / action_variance, dim=1)
+        policy_std = torch.exp(self.log_std).clamp(min=0.02, max=0.2)  # FIXED: Much lower max std
         
-        # Normalize rewards (subtract baseline to reduce variance)
-        if len(rewards) > 1:
-            reward_baseline = torch.mean(rewards)
-            advantages = rewards - reward_baseline
-        else:
-            advantages = rewards
+        # Calculate log probabilities using Gaussian policy
+        # log π(a|s) = -0.5 * [(a-μ)²/σ² + log(2πσ²)]
+        action_diff = actions_taken - predicted_actions
+        log_probs = -0.5 * (
+            torch.sum((action_diff / policy_std) ** 2, dim=1) +
+            2 * torch.sum(torch.log(policy_std)) + 
+            actions_taken.shape[1] * np.log(2 * np.pi)
+        )
         
-        # Policy gradient loss: -log_prob * advantage
+        # FIXED: Better advantage calculation using running mean baseline
+        if not hasattr(self, 'reward_baseline'):
+            self.reward_baseline = 0.0
+            self.baseline_alpha = 0.1
+        
+        # Update running baseline
+        current_reward_mean = torch.mean(rewards).item()
+        self.reward_baseline = (1 - self.baseline_alpha) * self.reward_baseline + self.baseline_alpha * current_reward_mean
+        
+        # Calculate advantages using running baseline
+        advantages = rewards - self.reward_baseline
+        
+        # FIXED: Only normalize variance if it's genuinely large, and preserve more signal
+        original_advantages = advantages.clone()
+        if len(advantages) > 1:
+            adv_std = torch.std(advantages)
+            if adv_std > 2.0:  # Only normalize if std is quite large
+                advantages = advantages / adv_std
+                print(f"  Normalizing advantages: original_std={adv_std:.3f}")
+            else:
+                print(f"  Keeping raw advantages: std={adv_std:.3f}")
+        
+        # FIXED: Only proceed with training if we have meaningful advantages
+        advantage_magnitude = torch.mean(torch.abs(original_advantages)).item()  # Use original, not normalized
+        if advantage_magnitude < 0.1:  # Increased threshold
+            print(f"Warning: Advantages too small ({advantage_magnitude:.3f}), skipping update")
+            return 0.0
+        
+        # Policy gradient loss: maximize E[log π(a|s) * A(s,a)]
+        # In PyTorch we minimize, so negate: -E[log π(a|s) * A(s,a)]
         policy_loss = -torch.mean(log_probs * advantages)
         
-        # Add entropy bonus to encourage exploration
-        entropy_bonus = 0.01 * torch.mean(torch.sum(outputs ** 2, dim=1))
+        # FIXED: Reduce entropy weight - it was dominating the loss
+        # Entropy for multivariate Gaussian: H = 0.5 * log((2πe)^k * |Σ|)
+        # For diagonal covariance: H = 0.5 * k * log(2πe) + 0.5 * sum(log(σ²))
+        entropy = 0.5 * (actions_taken.shape[1] * np.log(2 * np.pi * np.e) + torch.sum(2 * torch.log(policy_std)))
+        entropy_loss = -0.001 * entropy  # FIXED: Reduced from 0.01 to 0.001
         
-        total_loss = policy_loss + entropy_bonus
+        # FIXED: Remove the value function loss - it doesn't make sense here
+        # The value function should be a separate network, not the policy network
+        
+        # Total loss: policy loss + entropy loss
+        total_loss = policy_loss + entropy_loss
+        
+        # FIXED: Clip loss to prevent extreme values that destabilize training
+        total_loss = torch.clamp(total_loss, min=-2.0, max=2.0)
+        
+        # FIXED: Add gradient clipping before backward pass and check for NaN
+        if torch.isnan(total_loss) or torch.isinf(total_loss):
+            print(f"Warning: Invalid loss detected ({total_loss.item()}), skipping update")
+            return 0.0
         
         # Backward pass
         self.optimizer.zero_grad()
@@ -400,11 +452,40 @@ class ReinforcementLearningPlanner(AbstractPlanner):
         
         # Gradient clipping for stability
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+        if hasattr(self, 'log_std'):
+            torch.nn.utils.clip_grad_norm_([self.log_std], max_norm=1.0)
         
         self.optimizer.step()
         
         loss_value = total_loss.item()
         self.training_losses.append(loss_value)
+        
+        # Store additional metrics for debugging
+        if not hasattr(self, 'debug_metrics'):
+            self.debug_metrics = []
+        
+        # FIXED: Add more comprehensive debugging information
+        with torch.no_grad():
+            action_std = torch.std(predicted_actions, dim=0)
+            reward_spread = torch.max(rewards) - torch.min(rewards)
+        
+        self.debug_metrics.append({
+            'policy_loss': policy_loss.item(),
+            'entropy_loss': entropy_loss.item(),
+            'entropy': entropy.item(),
+            'mean_reward': torch.mean(rewards).item(),
+            'mean_advantage': torch.mean(advantages).item(),
+            'mean_advantage_original': torch.mean(original_advantages).item(),
+            'advantage_std': torch.std(advantages).item(),
+            'advantage_std_original': torch.std(original_advantages).item(),
+            'advantage_magnitude': advantage_magnitude,
+            'mean_log_prob': torch.mean(log_probs).item(),
+            'policy_std': torch.mean(policy_std).item(),
+            'reward_baseline': self.reward_baseline,
+            'reward_spread': reward_spread.item(),
+            'action_diversity_steering': action_std[0].item(),
+            'action_diversity_accel': action_std[1].item()
+        })
         
         return loss_value
 
@@ -433,15 +514,24 @@ class ReinforcementLearningPlanner(AbstractPlanner):
         trajectory_tensor = torch.tensor(trajectories, dtype=torch.float32)
         reward_tensor = torch.tensor(rewards, dtype=torch.float32)
         
+        # FIXED: Improve training by using the entire episode as one batch when possible
+        # This helps with advantage estimation and reduces noise
         total_loss = 0.0
         num_batches = 0
         
+        # Use larger effective batch size by accumulating gradients if needed
+        effective_batch_size = max(self.batch_size, min(16, len(trajectory_data)))
+        
         for epoch in range(self.num_epochs):
-            for i in range(0, len(trajectory_data), self.batch_size):
-                # Prepare batch
-                batch_images = image_tensor[i:i+self.batch_size]
-                batch_trajectories = trajectory_tensor[i:i+self.batch_size]
-                batch_rewards = reward_tensor[i:i+self.batch_size]
+            # Shuffle data for each epoch
+            indices = torch.randperm(len(trajectory_data))
+            
+            for i in range(0, len(trajectory_data), effective_batch_size):
+                # Prepare batch with shuffled indices
+                batch_indices = indices[i:i+effective_batch_size]
+                batch_images = image_tensor[batch_indices]
+                batch_trajectories = trajectory_tensor[batch_indices]
+                batch_rewards = reward_tensor[batch_indices]
                 
                 # Train step with policy gradient
                 loss = self.train_step_from_evaluation(batch_images, batch_trajectories, batch_rewards)
@@ -457,7 +547,8 @@ class ReinforcementLearningPlanner(AbstractPlanner):
             'num_epochs': self.num_epochs,
             'avg_reward': torch.mean(reward_tensor).item(),
             'max_reward': torch.max(reward_tensor).item(),
-            'min_reward': torch.min(reward_tensor).item()
+            'min_reward': torch.min(reward_tensor).item(),
+            'effective_batch_size': effective_batch_size
         }
 
     def collect_trajectory_for_training(self, simulator, renderer, evaluator, steps: int = 50) -> List[dict]:
@@ -496,48 +587,37 @@ class ReinforcementLearningPlanner(AbstractPlanner):
             if hasattr(env_state, 'rgb_image') and env_state.rgb_image is not None:
                 rgb_image = env_state.rgb_image
                 
+                # Get the action that the model would predict for this state
+                steering_angle, acceleration = self._predict_actions(rgb_image)
+                
                 # Predict trajectory using the new interface
                 trajectory = self.compute_planner_trajectory(env_state, state_history)
                 
-                # Extract steering angle and acceleration from the trajectory for training data
-                # We'll use the first few waypoints to estimate the actions taken
-                if len(trajectory.waypoints) >= 2:
-                    # Calculate steering angle from trajectory curvature
-                    wp1, wp2 = trajectory.waypoints[0], trajectory.waypoints[1]
-                    heading_diff = wp2.heading - wp1.heading
-                    steering_angle = heading_diff / self.sampling_time  # Approximate steering rate
-                    steering_angle = max(-self.max_steering_angle, min(self.max_steering_angle, steering_angle))
-                    
-                    # Calculate acceleration from velocity change
-                    current_velocity = math.sqrt(current_state.ego_pos.vehicle_parameters.vx**2 + 
-                                               current_state.ego_pos.vehicle_parameters.vy**2)
-                    # For simplicity, use a default acceleration towards target speed
-                    target_speed = 2.0
-                    acceleration = (target_speed - current_velocity) / self.sampling_time
-                    acceleration = max(-self.max_acceleration, min(self.max_acceleration, acceleration))
-                else:
-                    steering_angle = 0.0
-                    acceleration = 0.0
-                
-                # Normalize actions to [-1, 1] range for training
+                # Store the actual actions taken (normalized to [-1, 1])
                 normalized_steering = steering_angle / self.max_steering_angle
                 normalized_accel = acceleration / self.max_acceleration
+                
+                # Clamp to ensure actions are in valid range
+                normalized_steering = max(-1.0, min(1.0, normalized_steering))
+                normalized_accel = max(-1.0, min(1.0, normalized_accel))
                 
                 trajectory_history.append(trajectory)
                 simulator.do_action(trajectory)
                 
-                # Get evaluation score
-                if len(trajectory_history) > 1:  # Need some history for evaluation
+                # Get evaluation score based on the trajectory taken
+                if len(trajectory_history) >= 1:  # Can evaluate from first trajectory
                     reward = evaluator.compute_cumulative_score(trajectory_history, current_state)
                 else:
                     reward = 0.0
                 
-                # Store trajectory data
+                # Store trajectory data with consistent action representation
                 trajectory_data.append({
                     'rgb_image': rgb_image,
-                    'trajectory': [normalized_steering, normalized_accel],
+                    'trajectory': [normalized_steering, normalized_accel],  # Actions that were taken
                     'reward': reward,
-                    'step': step
+                    'step': step,
+                    'raw_steering': steering_angle,  # For debugging
+                    'raw_acceleration': acceleration  # For debugging
                 })
             
             prev_state = current_state
@@ -834,6 +914,172 @@ class ReinforcementLearningPlanner(AbstractPlanner):
         """Reset training and evaluation history."""
         self.training_losses = []
         self.evaluation_metrics = []
+
+    def plot_training_progress(self, save_path: str = None, show_plot: bool = True):
+        """
+        Plot training loss and metrics over time.
+        
+        :param save_path: Path to save the plot (optional)
+        :param show_plot: Whether to display the plot
+        """
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            print("matplotlib not available. Install with: pip install matplotlib")
+            return
+        
+        if not self.training_losses:
+            print("No training data to plot")
+            return
+        
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+        fig.suptitle('RL Training Progress', fontsize=16)
+        
+        # Plot 1: Training Loss
+        axes[0, 0].plot(self.training_losses, 'b-', alpha=0.7, linewidth=1)
+        axes[0, 0].set_title('Training Loss')
+        axes[0, 0].set_xlabel('Training Step')
+        axes[0, 0].set_ylabel('Loss')
+        axes[0, 0].grid(True, alpha=0.3)
+        
+        # Add moving average for loss
+        if len(self.training_losses) > 10:
+            window_size = min(50, len(self.training_losses) // 5)
+            moving_avg = []
+            for i in range(len(self.training_losses)):
+                start_idx = max(0, i - window_size + 1)
+                moving_avg.append(np.mean(self.training_losses[start_idx:i+1]))
+            axes[0, 0].plot(moving_avg, 'r-', linewidth=2, label=f'Moving Avg ({window_size})')
+            axes[0, 0].legend()
+        
+        # Plot 2: Reward Distribution (if debug metrics available)
+        if hasattr(self, 'debug_metrics') and self.debug_metrics:
+            rewards = [m['mean_reward'] for m in self.debug_metrics]
+            axes[0, 1].plot(rewards, 'g-', alpha=0.7)
+            axes[0, 1].set_title('Mean Rewards')
+            axes[0, 1].set_xlabel('Training Step')
+            axes[0, 1].set_ylabel('Mean Reward')
+            axes[0, 1].grid(True, alpha=0.3)
+            
+            # Policy loss
+            policy_losses = [m['policy_loss'] for m in self.debug_metrics]
+            axes[1, 0].plot(policy_losses, 'orange', alpha=0.7)
+            axes[1, 0].set_title('Policy Loss')
+            axes[1, 0].set_xlabel('Training Step')
+            axes[1, 0].set_ylabel('Policy Loss')
+            axes[1, 0].grid(True, alpha=0.3)
+            
+            # Advantages
+            advantages = [m['mean_advantage'] for m in self.debug_metrics]
+            axes[1, 1].plot(advantages, 'purple', alpha=0.7)
+            axes[1, 1].set_title('Mean Advantages')
+            axes[1, 1].set_xlabel('Training Step')
+            axes[1, 1].set_ylabel('Mean Advantage')
+            axes[1, 1].grid(True, alpha=0.3)
+            axes[1, 1].axhline(y=0, color='black', linestyle='--', alpha=0.5)
+        else:
+            # If no debug metrics, plot loss statistics
+            if len(self.training_losses) > 1:
+                # Loss variance
+                loss_var = []
+                window = 20
+                for i in range(window, len(self.training_losses)):
+                    loss_var.append(np.var(self.training_losses[i-window:i]))
+                axes[0, 1].plot(range(window, len(self.training_losses)), loss_var, 'orange')
+                axes[0, 1].set_title('Loss Variance (window=20)')
+                axes[0, 1].set_xlabel('Training Step')
+                axes[0, 1].set_ylabel('Loss Variance')
+                axes[0, 1].grid(True, alpha=0.3)
+            
+            # Loss histogram
+            axes[1, 0].hist(self.training_losses, bins=50, alpha=0.7, color='skyblue', edgecolor='black')
+            axes[1, 0].set_title('Loss Distribution')
+            axes[1, 0].set_xlabel('Loss Value')
+            axes[1, 0].set_ylabel('Frequency')
+            axes[1, 0].grid(True, alpha=0.3)
+            
+            # Loss trends (first/last comparison)
+            if len(self.training_losses) > 100:
+                first_100 = self.training_losses[:100]
+                last_100 = self.training_losses[-100:]
+                
+                axes[1, 1].boxplot([first_100, last_100], labels=['First 100', 'Last 100'])
+                axes[1, 1].set_title('Loss Comparison (First vs Last 100 steps)')
+                axes[1, 1].set_ylabel('Loss Value')
+                axes[1, 1].grid(True, alpha=0.3)
+            else:
+                axes[1, 1].text(0.5, 0.5, 'Need more data\nfor comparison', 
+                              ha='center', va='center', transform=axes[1, 1].transAxes)
+                axes[1, 1].set_title('Loss Comparison')
+        
+        plt.tight_layout()
+        
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            print(f"Training plot saved to {save_path}")
+        
+        if show_plot:
+            plt.show()
+        
+        return fig
+
+    def print_training_summary(self):
+        """Print a summary of training progress and statistics."""
+        if not self.training_losses:
+            print("No training data available")
+            return
+        
+        print("\n" + "="*60)
+        print("TRAINING SUMMARY")
+        print("="*60)
+        
+        print(f"Total training steps: {len(self.training_losses)}")
+        print(f"Current loss: {self.training_losses[-1]:.4f}")
+        print(f"Average loss: {np.mean(self.training_losses):.4f}")
+        print(f"Best loss: {min(self.training_losses):.4f}")
+        print(f"Worst loss: {max(self.training_losses):.4f}")
+        print(f"Loss std: {np.std(self.training_losses):.4f}")
+        
+        # Check for training trends
+        if len(self.training_losses) > 50:
+            recent_loss = np.mean(self.training_losses[-50:])
+            early_loss = np.mean(self.training_losses[:50])
+            improvement = early_loss - recent_loss
+            
+            print(f"\nTraining Progress:")
+            print(f"Early loss (first 50): {early_loss:.4f}")
+            print(f"Recent loss (last 50): {recent_loss:.4f}")
+            print(f"Improvement: {improvement:.4f} ({'✓' if improvement > 0 else '✗'})")
+        
+        # FIXED: Debug metrics summary with new structure
+        if hasattr(self, 'debug_metrics') and self.debug_metrics:
+            print(f"\nDetailed Metrics (last 10 steps):")
+            recent_metrics = self.debug_metrics[-10:]
+            
+            avg_policy_loss = np.mean([m['policy_loss'] for m in recent_metrics])
+            avg_entropy_loss = np.mean([m['entropy_loss'] for m in recent_metrics])
+            avg_reward = np.mean([m['mean_reward'] for m in recent_metrics])
+            avg_advantage = np.mean([m['mean_advantage'] for m in recent_metrics])
+            avg_advantage_std = np.mean([m['advantage_std'] for m in recent_metrics])
+            avg_advantage_mag = np.mean([m['advantage_magnitude'] for m in recent_metrics])
+            avg_policy_std = np.mean([m['policy_std'] for m in recent_metrics])
+            avg_reward_spread = np.mean([m['reward_spread'] for m in recent_metrics])
+            avg_action_div_steer = np.mean([m['action_diversity_steering'] for m in recent_metrics])
+            avg_action_div_accel = np.mean([m['action_diversity_accel'] for m in recent_metrics])
+            final_baseline = recent_metrics[-1]['reward_baseline']
+            
+            print(f"Avg Policy Loss: {avg_policy_loss:.4f}")
+            print(f"Avg Entropy Loss: {avg_entropy_loss:.4f}")
+            print(f"Avg Reward: {avg_reward:.2f}")
+            print(f"Avg Advantage: {avg_advantage:.4f}")
+            print(f"Avg Advantage Std: {avg_advantage_std:.4f}")
+            print(f"Avg Advantage Magnitude: {avg_advantage_mag:.6f}")
+            print(f"Avg Policy Std: {avg_policy_std:.4f}")
+            print(f"Avg Reward Spread: {avg_reward_spread:.2f}")
+            print(f"Action Diversity (Steer/Accel): {avg_action_div_steer:.4f} / {avg_action_div_accel:.4f}")
+            print(f"Reward Baseline: {final_baseline:.2f}")
+        
+        print("="*60)
 
 
 # Backward compatibility alias
